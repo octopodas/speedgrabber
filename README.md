@@ -72,7 +72,25 @@ speedgrabber /path/to/directory --upload --bucket my-bucket --concurrent 10 --pr
 
 ## Memory Optimization
 
-When scanning large directories or processing a large number of files, you may need to increase Node.js memory limit to avoid "JavaScript heap out of memory" errors. Use the `--max-old-space-size` option with Node.js:
+When scanning large directories or processing a large number of files, you may need to increase Node.js memory limit to avoid "JavaScript heap out of memory" errors. SpeedGrabber provides two ways to handle memory issues:
+
+### 1. Using the Wrapper Script (Recommended)
+
+The recommended approach is to use the included wrapper script, which runs each SpeedGrabber operation in an isolated process:
+
+```bash
+# Use the wrapper script directly
+./run-speedgrabber.js /path/to/directory --upload --bucket my-bucket --progress
+
+# Or if installed globally
+speedgrabber /path/to/directory --upload --bucket my-bucket --progress
+```
+
+This wrapper script automatically sets a 4GB memory limit and ensures complete memory cleanup between runs.
+
+### 2. Manual Memory Allocation
+
+Alternatively, you can manually set the Node.js memory limit:
 
 ```bash
 # Increase Node.js memory limit to 4GB
@@ -83,6 +101,15 @@ node --max-old-space-size=4096 $(which speedgrabber) /path/to/large/directory --
 ```
 
 Adjust the value (4096 = 4GB) based on your system's available memory.
+
+### Troubleshooting Memory Issues
+
+If you encounter persistent memory issues even with increased memory limits:
+
+1. Avoid running multiple large operations in the same terminal session
+2. Process smaller directories separately instead of one large directory
+3. Use the wrapper script which isolates each run in a separate process
+4. Restart your terminal session between large operations
 
 ## Prerequisites for S3 Upload
 

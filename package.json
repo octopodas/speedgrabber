@@ -2,10 +2,10 @@
   "name": "speedgrabber",
   "version": "1.0.0",
   "description": "A command-line tool to recursively scan directories and provide file statistics",
-  "main": "index.js",
+  "main": "run-speedgrabber.js",
   "type": "module",
   "bin": {
-    "speedgrabber": "./index.js"
+    "speedgrabber": "./run-speedgrabber.js"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

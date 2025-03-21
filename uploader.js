@@ -1,11 +1,38 @@
 import { exec } from 'child_process';
-import { promisify } from 'util';
 import path from 'path';
 import chalk from 'chalk';
 import { formatSize } from './utils.js';
 
-// Promisify exec for async/await usage
-const execAsync = promisify(exec);
+// Custom exec function with timeout and proper error handling
+const execAsync = (command, options = {}) => {
+  return new Promise((resolve, reject) => {
+    // Set a default timeout of 60 seconds
+    const timeout = options.timeout || 60000;
+    
+    console.log(`Executing command: ${command}`);
+    const childProcess = exec(command, options, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Command error: ${error.message}`);
+        if (stderr) console.error(`stderr: ${stderr}`);
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    
+    // Set a timeout to kill the process if it takes too long
+    const timer = setTimeout(() => {
+      childProcess.kill('SIGTERM');
+      console.error(`Command timed out after ${timeout/1000} seconds: ${command}`);
+      reject(new Error(`Command timed out after ${timeout/1000} seconds`));
+    }, timeout);
+    
+    // Clear the timeout when the process completes
+    childProcess.on('close', () => {
+      clearTimeout(timer);
+    });
+  });
+};
 
 /**
  * Upload a single file to S3
@@ -29,8 +56,9 @@ export async function uploadFileToS3(file, bucketName, basePath, verbose) {
       console.log(`${chalk.blue('Uploading:')} ${chalk.cyan(file.filepath)} ${chalk.gray('→')} ${chalk.yellow(s3Path)} (${formatSize(file.size)})`);
     }
     
-    // Execute AWS CLI command to upload the file
-    await execAsync(`aws s3 cp "${file.filepath}" "${s3Path}"`);
+    // Execute AWS CLI command to upload the file with a timeout
+    const command = `aws s3 cp "${file.filepath}" "${s3Path}" --no-progress`;
+    await execAsync(command, { timeout: 60000 }); // 60 second timeout per file
     
     // Update file status to 'done'
     file.status = 'done';
@@ -66,12 +94,16 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
   let completedUploads = 0;
   let lastProgressUpdate = Date.now();
   const progressInterval = 1000; // Update progress every second
-  const showProgress = options.progress;
-  const verbose = options.verbose;
+  const showProgress = options?.progress || false;
+  const verbose = options?.verbose || false;
   
   // Upload statistics
   let totalBytesUploaded = 0;
   const uploadStartTime = Date.now();
+  
+  // Ensure maxConcurrent is a number and has a reasonable default
+  const concurrentUploads = typeof maxConcurrent === 'number' && maxConcurrent > 0 ? maxConcurrent : 5;
+  console.log(`Using concurrent uploads: ${concurrentUploads} (maxConcurrent value received: ${maxConcurrent}, type: ${typeof maxConcurrent})`);
   
   // Create a queue of files to upload
   const uploadQueue = [...files];
@@ -81,30 +113,43 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
     if (uploadQueue.length === 0) return;
     
     const batch = [];
-    const batchSize = Math.min(maxConcurrent, uploadQueue.length);
+    const batchSize = Math.min(concurrentUploads, uploadQueue.length);
+    
+    console.log(`Processing batch of ${batchSize} files, ${uploadQueue.length} remaining in queue`);
     
     for (let i = 0; i < batchSize; i++) {
       if (uploadQueue.length > 0) {
         const file = uploadQueue.shift();
-        if (file.status === 'ready') {
-          batch.push(uploadFileToS3(file, bucketName, basePath, verbose).then(() => {
-            completedUploads++;
-            
-            // Update total bytes uploaded for successful uploads
-            if (file.status === 'done') {
-              totalBytesUploaded += file.size;
-            }
-            
-            // Show progress if enabled and not in verbose mode (to avoid cluttering output)
-            if (showProgress && !verbose) {
-              const now = Date.now();
-              if (now - lastProgressUpdate > progressInterval) {
-                const percent = Math.round((completedUploads / totalFiles) * 100);
-                process.stdout.write(`\rUploading: ${completedUploads}/${totalFiles} files (${percent}%)`);
-                lastProgressUpdate = now;
-              }
-            }
-          }));
+        if (file && file.status === 'ready') {
+          batch.push(
+            uploadFileToS3(file, bucketName, basePath, verbose)
+              .then((success) => {
+                completedUploads++;
+                
+                // Update total bytes uploaded for successful uploads
+                if (success && file.status === 'done') {
+                  totalBytesUploaded += file.size;
+                }
+                
+                // Show progress if enabled and not in verbose mode (to avoid cluttering output)
+                if (showProgress && !verbose) {
+                  const now = Date.now();
+                  if (now - lastProgressUpdate > progressInterval) {
+                    const percent = Math.round((completedUploads / totalFiles) * 100);
+                    process.stdout.write(`\rUploading: ${completedUploads}/${totalFiles} files (${percent}%)`);
+                    lastProgressUpdate = now;
+                  }
+                }
+                
+                // Explicitly clear file data to free memory
+                file.filepath = null;
+                file.error = null;
+              })
+              .catch(err => {
+                console.error(`Unexpected error during upload: ${err.message}`);
+                completedUploads++;
+              })
+          );
         } else {
           // Skip files that are not in 'ready' status
           completedUploads++;
@@ -112,12 +157,43 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
       }
     }
     
-    // Wait for the current batch to complete
-    await Promise.all(batch);
+    try {
+      // Wait for the current batch to complete with a timeout
+      const batchTimeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Batch upload timeout')), 180000); // 3 minute timeout for batch
+      });
+      
+      await Promise.race([
+        Promise.all(batch),
+        batchTimeout
+      ]);
+      
+      console.log(`Batch completed, ${completedUploads}/${totalFiles} files processed`);
+    } catch (error) {
+      console.error(`Batch error: ${error.message}`);
+      // Continue with next batch even if this one failed
+    }
+    
+    // Force garbage collection between batches (if globalThis.gc is available)
+    if (typeof globalThis.gc === 'function') {
+      try {
+        console.log('Running garbage collection between batches...');
+        globalThis.gc();
+      } catch (e) {
+        // Ignore errors if gc is not available
+      }
+    }
     
     // Process the next batch
     if (uploadQueue.length > 0) {
-      await processUploads();
+      // Use setImmediate to allow event loop to process other events
+      // and potentially free up memory before processing next batch
+      return new Promise(resolve => {
+        setImmediate(async () => {
+          await processUploads();
+          resolve();
+        });
+      });
     }
   }
   
@@ -130,7 +206,7 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
   // Calculate upload time and rate
   const uploadEndTime = Date.now();
   const uploadTimeSeconds = (uploadEndTime - uploadStartTime) / 1000;
-  const uploadRateMBps = (totalBytesUploaded / 1024 / 1024) / uploadTimeSeconds;
+  const uploadRateMBps = totalBytesUploaded > 0 ? (totalBytesUploaded / 1024 / 1024) / uploadTimeSeconds : 0;
   
   // Clear the progress line
   if (showProgress && !verbose) {
@@ -155,7 +231,7 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
   if (uploadStats.failed.length > 0) {
     console.log(chalk.red('\nFailed uploads:'));
     uploadStats.failed.forEach(filepath => {
-      console.log(`  ${chalk.red('\u2717')} ${filepath}`);
+      console.log(`  ${chalk.red('×')} ${filepath}`);
     });
   }
 }
