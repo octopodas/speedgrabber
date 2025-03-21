@@ -47,3 +47,6 @@ build/Release
 
 # VS Code settings
 .vscode/
+
+# SSH key script
+add-key.sh
