@@ -26,7 +26,7 @@ if (isMainThread) {
     .option('-p, --progress', 'Show progress during scan')
     .option('-u, --upload', 'Upload files to S3 after scanning')
     .option('-b, --bucket <name>', 'S3 bucket name for upload')
-    .option('-c, --concurrent <number>', 'Number of concurrent uploads', parseInt, 5)
+    .option('-c, --concurrent <number>', 'Number of concurrent uploads', (val) => parseInt(val, 10) || 5)
     .action(async (directory, options) => {
       const targetDir = path.resolve(directory);
       
@@ -79,7 +79,18 @@ if (isMainThread) {
             process.exit(1);
           }
           
+          // Force garbage collection before upload if available
+          if (typeof globalThis.gc === 'function') {
+            try {
+              console.log(chalk.blue('Running garbage collection before upload...'));
+              globalThis.gc();
+            } catch (e) {
+              // Ignore errors if gc is not available
+            }
+          }
+          
           // Upload files to S3
+          console.log(`Debug: Concurrent parameter value: ${options.concurrent}, type: ${typeof options.concurrent}`);
           await uploadFilesToS3(
             fileStructure,
             options.bucket,
@@ -90,6 +101,20 @@ if (isMainThread) {
           
           // Clear files from memory after upload is complete
           fileStructure.clearFiles();
+          
+          // Force garbage collection after upload if available
+          if (typeof globalThis.gc === 'function') {
+            try {
+              console.log(chalk.blue('Running garbage collection after upload...'));
+              globalThis.gc();
+            } catch (e) {
+              // Ignore errors if gc is not available
+            }
+          }
+          
+          // Explicitly exit the process after upload is complete
+          console.log(chalk.green('SpeedGrabber completed successfully.'));
+          process.exit(0);
         }
       } catch (error) {
         console.error(chalk.red(`Error: ${error.message}`));
