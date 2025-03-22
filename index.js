@@ -27,6 +27,7 @@ if (isMainThread) {
     .option('-u, --upload', 'Upload files to S3 after scanning')
     .option('-b, --bucket <name>', 'S3 bucket name for upload')
     .option('-c, --concurrent <number>', 'Number of concurrent uploads', (val) => parseInt(val, 10) || 5)
+    .option('--checkExist', 'Check if files exist in S3 before uploading')
     .action(async (directory, options) => {
       const targetDir = path.resolve(directory);
       
@@ -96,7 +97,7 @@ if (isMainThread) {
             options.bucket,
             targetDir,
             options.concurrent,
-            { progress: options.progress, verbose: options.verbose }
+            { progress: options.progress, verbose: options.verbose, checkExist: options.checkExist }
           );
           
           // Clear files from memory after upload is complete

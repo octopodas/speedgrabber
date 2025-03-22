@@ -1,73 +1,87 @@
 # SpeedGrabber
 
-A command-line tool to recursively scan directories, provide file statistics, and optionally upload files to AWS S3 buckets.
+A high-performance tool for recursively scanning directories, analyzing file statistics, and efficiently uploading files to Amazon S3. Built with Node.js for maximum speed and memory efficiency.
 
 ## Features
 
-- Recursively scans a target directory
-- Collects information about all files (path, size, status)
-- Provides statistics (total files, total size)
-- Supports verbose output for detailed file listings
-- Uploads files to AWS S3 buckets with parallel processing
-- Tracks upload progress and provides performance metrics
+- **Fast Directory Scanning**: Efficiently scans directories with millions of files
+- **Multi-threaded Processing**: Uses worker threads for parallel processing
+- **S3 Integration**: Uploads files to Amazon S3 with configurable concurrency
+- **Memory Optimization**: Includes garbage collection and memory management features
+- **Progress Reporting**: Real-time progress indicators for long-running operations
+- **Detailed Statistics**: Provides comprehensive file and directory statistics
+- **Selective Uploads**: Option to check if files exist in S3 before uploading
 
 ## Installation
 
-### Local Installation
+### Prerequisites
 
-```bash
-# Clone the repository
-git clone <repository-url>
-cd speedgrabber
+- Node.js 16.x or higher
+- AWS CLI installed and configured with appropriate credentials
+- Permissions to access the target S3 bucket
 
-# Install dependencies
-npm install
-
-# Make the tool globally available
-npm link
-```
-
-### Global Installation (from npm)
+### Global Installation
 
 ```bash
 npm install -g speedgrabber
 ```
 
+### Local Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/speedgrabber.git
+cd speedgrabber
+
+# Install dependencies
+npm install
+
+# Make the wrapper script executable
+chmod +x run-speedgrabber.js
+```
+
 ## Usage
 
 ```bash
-speedgrabber <directory> [options]
+speedgrabber [options] <directory>
 ```
 
 ### Arguments
 
-- `<directory>`: The target directory to scan (required)
+- `directory`: Target directory to scan (required)
 
 ### Options
 
-- `-v, --verbose`: Display detailed information about each file and upload process
-- `-w, --workers <number>`: Number of worker threads to use for scanning
-- `-p, --progress`: Show progress during scan and upload
+- `-v, --verbose`: Display detailed information about each file
+- `-w, --workers <number>`: Number of worker threads to use
+- `-p, --progress`: Show progress during scan
 - `-u, --upload`: Upload files to S3 after scanning
-- `-b, --bucket <name>`: S3 bucket name for upload
+- `-b, --bucket <n>`: S3 bucket name for upload
 - `-c, --concurrent <number>`: Number of concurrent uploads (default: 5)
+- `--checkExist`: Check if files exist in S3 before uploading
 - `-h, --help`: Display help information
 - `-V, --version`: Display version information
 
 ### Examples
 
 ```bash
-# Scan the current directory
-speedgrabber .
+# Basic scan
+speedgrabber /path/to/directory
 
-# Scan a specific directory with verbose output
+# Scan with progress indicator
+speedgrabber /path/to/directory --progress
+
+# Scan with detailed file information
 speedgrabber /path/to/directory --verbose
 
-# Scan and upload files to S3
-speedgrabber /path/to/directory --upload --bucket my-bucket --progress
+# Upload files to S3
+speedgrabber /path/to/directory --upload --bucket my-bucket
 
 # Customize concurrent uploads
 speedgrabber /path/to/directory --upload --bucket my-bucket --concurrent 10 --progress
+
+# Scan and upload only files that don't exist in S3 yet
+speedgrabber /path/to/directory --upload --bucket my-bucket --checkExist
 ```
 
 ## Memory Optimization
@@ -86,7 +100,10 @@ The recommended approach is to use the included wrapper script, which runs each 
 speedgrabber /path/to/directory --upload --bucket my-bucket --progress
 ```
 
-This wrapper script automatically sets a 4GB memory limit and ensures complete memory cleanup between runs.
+This wrapper script automatically sets the following Node.js flags:
+- `--expose-gc`: Enables manual garbage collection
+- `--max-old-space-size=8192`: Sets 8GB memory limit
+- `--max-semi-space-size=512`: Optimizes garbage collection
 
 ### 2. Manual Memory Allocation
 
@@ -110,20 +127,39 @@ If you encounter persistent memory issues even with increased memory limits:
 2. Process smaller directories separately instead of one large directory
 3. Use the wrapper script which isolates each run in a separate process
 4. Restart your terminal session between large operations
+5. Reduce the number of concurrent uploads with the `-c` parameter
 
-## Prerequisites for S3 Upload
+## S3 Upload Features
 
-- AWS CLI installed and configured with appropriate credentials
-- Permissions to access the target S3 bucket
+### Concurrent Uploads
+
+SpeedGrabber supports configurable concurrent uploads to maximize throughput:
+
+```bash
+# Upload with 20 concurrent connections
+speedgrabber /path/to/directory --upload --bucket my-bucket --concurrent 20
+```
+
+### Selective Uploads
+
+To avoid re-uploading existing files, use the `--checkExist` flag:
+
+```bash
+# Only upload files that don't exist in the bucket
+speedgrabber /path/to/directory --upload --bucket my-bucket --checkExist
+```
+
+This option checks if each file already exists in S3 before uploading, which can save bandwidth and time for incremental uploads.
 
 ## File Structure
 
 Each file in the scan results contains the following information:
 
 - `filepath`: The absolute path to the file
-- `size`: The size of the file in bytes
-- `status`: The status of the file ('ready', 'transfer', 'done', or 'failed')
+- `size`: File size in bytes
+- `status`: Current status of the file (ready, transfer, done, failed)
+- `error`: Error message if upload failed
 
 ## License
 
-ISC
+MIT
