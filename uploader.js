@@ -10,7 +10,7 @@ const execAsync = (command, options = {}) => {
     const timeout = options.timeout || 60000;
     
     console.log(`Executing command: ${command}`);
-    const childProcess = exec(command, options, (error, stdout, stderr) => {
+    const childProcess = exec(command, { ...options, maxBuffer: 100 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         console.error(`Command error: ${error.message}`);
         if (stderr) console.error(`stderr: ${stderr}`);
@@ -163,7 +163,7 @@ export async function uploadDirectoryToS3(folder, bucketName, basePath, verbose 
     // Execute AWS CLI command to upload the directory with a timeout
     // Use --recursive flag to upload the entire directory
     const command = `aws s3 cp "${folder.path}" "${s3Path}" --recursive`;
-    await execAsync(command, { timeout: 300000 }); // 5 minute timeout per directory
+    await execAsync(command, { timeout: 300000, maxBuffer: 100 * 1024 * 1024 }); // 5 minute timeout per directory with 100MB buffer
     
     // Update result
     result.status = 'done';
