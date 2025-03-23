@@ -8,6 +8,13 @@ export class FileStructure {
     this.totalFiles = 0;
     this.processedDirs = 0;
     this.storeFiles = true; // Always store files if upload is needed
+    this.firstLevelFolders = []; // Array to store first level folders
+    this.rootDirName = ''; // Store the root directory name
+  }
+
+  // Set the root directory name (leaf segment of the supplied path)
+  setRootDirName(rootDirName) {
+    this.rootDirName = rootDirName;
   }
 
   addFile(filepath, size) {
@@ -20,6 +27,24 @@ export class FileStructure {
     }
     this.totalSize += size;
     this.totalFiles += 1;
+  }
+
+  addFirstLevelFolder(folderPath, fileCount = 0, totalSize = 0) {
+    // Check if folder already exists
+    const existingIndex = this.firstLevelFolders.findIndex(f => f.path === folderPath);
+    
+    if (existingIndex >= 0) {
+      // Update existing folder
+      this.firstLevelFolders[existingIndex].fileCount += fileCount;
+      this.firstLevelFolders[existingIndex].totalSize += totalSize;
+    } else {
+      // Add new folder
+      this.firstLevelFolders.push({
+        path: folderPath,
+        fileCount: fileCount,
+        totalSize: totalSize
+      });
+    }
   }
 
   addBatch(filesBatch) {
@@ -41,7 +66,9 @@ export class FileStructure {
       totalFiles: this.totalFiles,
       totalSize: this.totalSize,
       files: this.files,
-      processedDirs: this.processedDirs
+      processedDirs: this.processedDirs,
+      firstLevelFolders: this.firstLevelFolders,
+      rootDirName: this.rootDirName
     };
   }
 

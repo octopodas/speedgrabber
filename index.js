@@ -66,6 +66,15 @@ if (isMainThread) {
         console.log(`Directories processed: ${chalk.bold(statistics.processedDirs.toLocaleString())}`);
         console.log(`Scan time: ${chalk.bold((endTime - startTime) / 1000)} seconds`);
         
+        // Display first-level folder substructure
+        if (statistics.firstLevelFolders && statistics.firstLevelFolders.length > 0) {
+          console.log(chalk.yellow(`\nFolder structure inside '${statistics.rootDirName}':`));
+          statistics.firstLevelFolders.forEach(folder => {
+            const folderName = path.basename(folder.path);
+            console.log(`${chalk.cyan(folderName)} - ${chalk.bold(folder.fileCount.toLocaleString())} files - ${chalk.bold(formatSize(folder.totalSize))}`);
+          });
+        }
+        
         if (options.verbose) {
           console.log(chalk.yellow('\nDetailed file listing:'));
           statistics.files.forEach(file => {

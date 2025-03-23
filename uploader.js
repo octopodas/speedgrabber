@@ -57,6 +57,31 @@ async function checkFileExistsInS3(s3Path) {
 }
 
 /**
+ * Check if a directory exists in S3
+ * @param {string} s3Path - S3 path to check
+ * @returns {Promise<boolean>} - Whether the directory exists
+ */
+async function checkDirectoryExistsInS3(s3Path) {
+  try {
+    // Extract bucket and key from s3 path
+    // s3Path format: s3://bucket-name/path/to/directory/
+    const s3PathParts = s3Path.replace('s3://', '').split('/');
+    const bucketName = s3PathParts.shift();
+    const prefix = s3PathParts.join('/') + '/';
+    
+    // Use aws s3api list-objects to check if directory exists (has any objects)
+    const command = `aws s3api list-objects --bucket "${bucketName}" --prefix "${prefix}" --max-items 1`;
+    const result = await execAsync(command, { timeout: 10000 });
+    
+    // If we get any results, the directory exists
+    return result.stdout && result.stdout.trim().length > 0;
+  } catch (error) {
+    // If the command fails, assume the directory doesn't exist
+    return false;
+  }
+}
+
+/**
  * Upload a single file to S3
  * @param {object} file - File object with filepath, size and status properties
  * @param {string} bucketName - S3 bucket name
@@ -89,7 +114,7 @@ export async function uploadFileToS3(file, bucketName, basePath, verbose = false
     }
     
     // Execute AWS CLI command to upload the file with a timeout
-    const command = `aws s3 cp "${file.filepath}" "${s3Path}" --no-progress`;
+    const command = `aws s3 cp "${file.filepath}" "${s3Path}"`;
     await execAsync(command, { timeout: 60000 }); // 60 second timeout per file
     
     // Update file status to 'done'
@@ -110,31 +135,75 @@ export async function uploadFileToS3(file, bucketName, basePath, verbose = false
 }
 
 /**
- * Manage the upload process for multiple files
- * @param {object} fileStructure - FileStructure instance with files to upload
+ * Upload a directory to S3
+ * @param {object} folder - Folder object with path, fileCount and totalSize properties
+ * @param {string} bucketName - S3 bucket name
+ * @param {string} basePath - Base directory path for relative path calculation
+ * @param {boolean} verbose - Whether to show detailed output
+ * @returns {Promise<object>} - Result with success status and bytes uploaded
+ */
+export async function uploadDirectoryToS3(folder, bucketName, basePath, verbose = false) {
+  const result = {
+    success: false,
+    bytesUploaded: 0,
+    status: 'transfer'
+  };
+  
+  try {
+    // Calculate the S3 path (preserve directory structure)
+    const relativePath = path.relative(basePath, folder.path);
+    const s3Path = `s3://${bucketName}/${relativePath}`;
+    const folderName = path.basename(folder.path);
+    
+    // Print verbose information if requested
+    if (verbose) {
+      console.log(`${chalk.blue('Uploading directory:')} ${chalk.cyan(folderName)} ${chalk.gray('→')} ${chalk.yellow(s3Path)} (${formatSize(folder.totalSize)}, ${folder.fileCount} files)`);
+    }
+    
+    // Execute AWS CLI command to upload the directory with a timeout
+    // Use --recursive flag to upload the entire directory
+    const command = `aws s3 cp "${folder.path}" "${s3Path}" --recursive`;
+    await execAsync(command, { timeout: 300000 }); // 5 minute timeout per directory
+    
+    // Update result
+    result.status = 'done';
+    result.success = true;
+    result.bytesUploaded = folder.totalSize;
+    return result;
+  } catch (error) {
+    // Update result to failed
+    result.status = 'failed';
+    result.error = error.message;
+    
+    // Print error in verbose mode
+    if (verbose) {
+      console.log(`${chalk.red('Failed directory:')} ${chalk.cyan(path.basename(folder.path))} - ${chalk.red(error.message)}`);
+    }
+    
+    return result;
+  }
+}
+
+/**
+ * Manage the upload process for directories
+ * @param {object} fileStructure - FileStructure instance with folders to upload
  * @param {string} bucketName - S3 bucket name
  * @param {string} basePath - Base directory path for relative path calculation
  * @param {number} maxConcurrent - Maximum number of concurrent uploads
  * @param {object} options - Upload options
  * @param {boolean} options.progress - Whether to show progress during upload
  * @param {boolean} options.verbose - Whether to show detailed output
- * @param {boolean} options.checkExist - Whether to check if file exists before uploading
  * @returns {Promise<void>}
  */
 export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxConcurrent, options) {
-  const files = fileStructure.files;
-  const totalFiles = files.length;
+  // We'll only use the first-level folders for uploading
+  const folders = fileStructure.firstLevelFolders;
+  const totalFolders = folders.length;
   let completedUploads = 0;
   let lastProgressUpdate = Date.now();
   const progressInterval = 1000; // Update progress every second
   const showProgress = options?.progress || false;
   const verbose = options?.verbose || false;
-  const checkExist = options?.checkExist || false;
-  
-  // If checking for existing files, log it
-  if (checkExist) {
-    console.log(chalk.blue('Checking for existing files in S3 before uploading'));
-  }
   
   // Upload statistics
   let totalBytesUploaded = 0;
@@ -144,8 +213,16 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
   const concurrentUploads = typeof maxConcurrent === 'number' && maxConcurrent > 0 ? maxConcurrent : 5;
   console.log(`Using concurrent uploads: ${concurrentUploads} (maxConcurrent value received: ${maxConcurrent}, type: ${typeof maxConcurrent})`);
   
-  // Create a queue of files to upload
-  const uploadQueue = [...files];
+  // Create a queue of folders to upload
+  const uploadQueue = [...folders];
+  
+  // Track upload status for each folder
+  const folderStatus = {
+    ready: totalFolders,
+    transfer: 0,
+    done: 0,
+    failed: []
+  };
   
   // Function to process the next batch of uploads
   async function processUploads() {
@@ -154,44 +231,46 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
     const batch = [];
     const batchSize = Math.min(concurrentUploads, uploadQueue.length);
     
-    console.log(`Processing batch of ${batchSize} files, ${uploadQueue.length} remaining in queue`);
+    console.log(`Processing batch of ${batchSize} directories, ${uploadQueue.length} remaining in queue`);
     
     for (let i = 0; i < batchSize; i++) {
       if (uploadQueue.length > 0) {
-        const file = uploadQueue.shift();
-        if (file && file.status === 'ready') {
+        const folder = uploadQueue.shift();
+        if (folder) {
+          folderStatus.ready--;
+          folderStatus.transfer++;
+          
           batch.push(
-            uploadFileToS3(file, bucketName, basePath, verbose, checkExist)
-              .then((success) => {
+            uploadDirectoryToS3(folder, bucketName, basePath, verbose)
+              .then((result) => {
                 completedUploads++;
+                folderStatus.transfer--;
                 
                 // Update total bytes uploaded for successful uploads
-                if (success && file.status === 'done') {
-                  totalBytesUploaded += file.size;
+                if (result.success && result.status === 'done') {
+                  totalBytesUploaded += result.bytesUploaded;
+                  folderStatus.done++;
+                } else if (result.status === 'failed') {
+                  folderStatus.failed.push(folder.path);
                 }
                 
                 // Show progress if enabled and not in verbose mode (to avoid cluttering output)
                 if (showProgress && !verbose) {
                   const now = Date.now();
                   if (now - lastProgressUpdate > progressInterval) {
-                    const percent = Math.round((completedUploads / totalFiles) * 100);
-                    process.stdout.write(`\rUploading: ${completedUploads}/${totalFiles} files (${percent}%)`);
+                    const percent = Math.round((completedUploads / totalFolders) * 100);
+                    process.stdout.write(`\rUploading: ${completedUploads}/${totalFolders} directories (${percent}%)`);
                     lastProgressUpdate = now;
                   }
                 }
-                
-                // Explicitly clear file data to free memory
-                file.filepath = null;
-                file.error = null;
               })
               .catch(err => {
                 console.error(`Unexpected error during upload: ${err.message}`);
                 completedUploads++;
+                folderStatus.transfer--;
+                folderStatus.failed.push(folder.path);
               })
           );
-        } else {
-          // Skip files that are not in 'ready' status
-          completedUploads++;
         }
       }
     }
@@ -199,7 +278,7 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
     try {
       // Wait for the current batch to complete with a timeout
       const batchTimeout = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Batch upload timeout')), 180000); // 3 minute timeout for batch
+        setTimeout(() => reject(new Error('Batch upload timeout')), 600000); // 10 minute timeout for batch
       });
       
       await Promise.race([
@@ -207,7 +286,7 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
         batchTimeout
       ]);
       
-      console.log(`Batch completed, ${completedUploads}/${totalFiles} files processed`);
+      console.log(`Batch completed, ${completedUploads}/${totalFolders} directories processed`);
     } catch (error) {
       console.error(`Batch error: ${error.message}`);
       // Continue with next batch even if this one failed
@@ -237,7 +316,7 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
   }
   
   console.log(chalk.blue(`Starting upload to S3 bucket: ${bucketName}`));
-  console.log(chalk.blue(`Total files to upload: ${totalFiles}`));
+  console.log(chalk.blue(`Total directories to upload: ${totalFolders}`));
   
   // Start the upload process
   await processUploads();
@@ -252,24 +331,21 @@ export async function uploadFilesToS3(fileStructure, bucketName, basePath, maxCo
     process.stdout.write('\r' + ' '.repeat(80) + '\r');
   }
   
-  // Get upload statistics
-  const uploadStats = fileStructure.getUploadStatistics();
-  
   // Display results
   console.log(chalk.green('\nUpload completed!'));
   console.log(chalk.yellow('Upload Statistics:'));
-  console.log(`Files ready: ${chalk.bold(uploadStats.ready)}`);
-  console.log(`Files in transfer: ${chalk.bold(uploadStats.transfer)}`);
-  console.log(`Files uploaded successfully: ${chalk.bold(uploadStats.done)}`);
-  console.log(`Files failed: ${chalk.bold(uploadStats.failed.length)}`);
+  console.log(`Directories ready: ${chalk.bold(folderStatus.ready)}`);
+  console.log(`Directories in transfer: ${chalk.bold(folderStatus.transfer)}`);
+  console.log(`Directories uploaded successfully: ${chalk.bold(folderStatus.done)}`);
+  console.log(`Directories failed: ${chalk.bold(folderStatus.failed.length)}`);
   console.log(`Total data uploaded: ${chalk.bold(formatSize(totalBytesUploaded))}`);
   console.log(`Average upload rate: ${chalk.bold(uploadRateMBps.toFixed(2))} MB/sec`);
   console.log(`Upload time: ${chalk.bold(uploadTimeSeconds.toFixed(2))} seconds`);
   
-  // Display failed files if any
-  if (uploadStats.failed.length > 0) {
+  // Display failed directories if any
+  if (folderStatus.failed.length > 0) {
     console.log(chalk.red('\nFailed uploads:'));
-    uploadStats.failed.forEach(filepath => {
+    folderStatus.failed.forEach(filepath => {
       console.log(`  ${chalk.red('×')} ${filepath}`);
     });
   }

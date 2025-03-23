@@ -13,9 +13,13 @@ const __filename = fileURLToPath(import.meta.url);
  * This is executed when the file is imported as a worker
  */
 if (!isMainThread) {
-  const { dirPath } = workerData;
+  const { dirPath, rootDirName } = workerData;
   const filesBatch = [];
   let processedDirs = 0;
+  
+  // Track first-level folder statistics
+  const folderStats = {};
+  const rootDir = path.dirname(dirPath);
   
   async function scanDirectoryWorker(dirPath) {
     try {
@@ -41,6 +45,18 @@ if (!isMainThread) {
         const statsPromises = filesToProcess.map(async (filePath) => {
           try {
             const stats = await fs.promises.stat(filePath);
+            
+            // If this file belongs to a first-level folder, track its statistics
+            const firstLevelParent = getFirstLevelParent(filePath, rootDir, rootDirName);
+            
+            if (firstLevelParent) {
+              if (!folderStats[firstLevelParent]) {
+                folderStats[firstLevelParent] = { fileCount: 0, totalSize: 0 };
+              }
+              folderStats[firstLevelParent].fileCount++;
+              folderStats[firstLevelParent].totalSize += stats.size;
+            }
+            
             return { filepath: filePath, size: stats.size, status: 'ready' };
           } catch (error) {
             // Skip files with errors
@@ -61,9 +77,23 @@ if (!isMainThread) {
     }
   }
   
+  // Helper function to get the first level parent directory
+  function getFirstLevelParent(filePath, rootDir, rootDirName) {
+    // Get the path relative to the root directory
+    const relativePath = path.relative(rootDir, filePath);
+    const parts = relativePath.split(path.sep);
+    
+    // Check if the path contains the rootDirName and at least one more segment
+    if (parts.length > 0 && parts[0] === rootDirName && parts.length > 1) {
+      // Return the first-level folder path (rootDir/rootDirName/firstLevelFolder)
+      return path.join(rootDir, rootDirName, parts[1]);
+    }
+    return null;
+  }
+  
   // Start scanning
   scanDirectoryWorker(dirPath).then(() => {
-    parentPort.postMessage({ filesBatch, processedDirs });
+    parentPort.postMessage({ filesBatch, processedDirs, folderStats });
   });
 }
 
@@ -79,6 +109,10 @@ if (!isMainThread) {
 export async function scanDirectoryParallel(dirPath, fileStructure, options = {}) {
   const numWorkers = options.workers || Math.max(1, os.cpus().length - 1);
   
+  // Extract the leaf segment of the directory path to use as the root
+  const rootDirName = path.basename(dirPath);
+  fileStructure.setRootDirName(rootDirName);
+  
   // Function to get all immediate subdirectories
   async function getSubdirectories(dirPath) {
     try {
@@ -91,6 +125,9 @@ export async function scanDirectoryParallel(dirPath, fileStructure, options = {}
         const fullPath = path.join(dirPath, entry.name);
         if (entry.isDirectory()) {
           dirs.push(fullPath);
+          
+          // Add to first level folders with initial counts
+          fileStructure.addFirstLevelFolder(fullPath, 0, 0);
         } else if (entry.isFile()) {
           try {
             const stats = await fs.promises.stat(fullPath);
@@ -134,11 +171,11 @@ export async function scanDirectoryParallel(dirPath, fileStructure, options = {}
   function createWorker(workerDirPath) {
     return new Promise((resolve) => {
       const worker = new Worker(new URL(import.meta.url), {
-        workerData: { dirPath: workerDirPath }
+        workerData: { dirPath: workerDirPath, rootDirName }
       });
       
       worker.on('message', (data) => {
-        const { filesBatch, processedDirs } = data;
+        const { filesBatch, processedDirs, folderStats } = data;
         
         // Add the batch of files to our structure
         if (filesBatch.length > 0) {
@@ -147,6 +184,11 @@ export async function scanDirectoryParallel(dirPath, fileStructure, options = {}
         
         // Update processed directories count
         fileStructure.incrementProcessedDirs(processedDirs);
+        
+        // Update folder statistics
+        for (const folder in folderStats) {
+          fileStructure.addFirstLevelFolder(folder, folderStats[folder].fileCount, folderStats[folder].totalSize);
+        }
         
         // Show progress if enough time has passed
         const now = Date.now();
